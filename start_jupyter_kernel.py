@@ -18,9 +18,9 @@ JUPYTER_PORT = 8888
 # TIMEOUT = 3600 # seconds
 TIMEOUT = 86400  # 24 hours maximum for Modal sandbox -- if training longer, consider using a Modal function!
 # -> when you use that, don't forget to stop after you're done!
-GPU_TYPE = 'l4' # choose according to: https://modal.com/pricing
-NUM_CPUS = 4 # for training want more than 1 (4 is good)
-MEM = 16384 # for training you need more (16384 is a good default)ccording to: https://modal.com/pricing
+GPU_TYPE = 'L4' # choose according to: https://modal.com/pricing
+NUM_CPUS = 8 # for training want more than 1 (4 is good)
+MEM = 32768 # for training you need more (16384 is a good default)ccording to: https://modal.com/pricing
 ###########################
 
 
