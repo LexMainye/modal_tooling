@@ -18,18 +18,32 @@ JUPYTER_PORT = 8888
 # TIMEOUT = 3600 # seconds
 TIMEOUT = 86400  # 24 hours maximum for Modal sandbox -- if training longer, consider using a Modal function!
 # -> when you use that, don't forget to stop after you're done!
-GPU_TYPE = 'L4' # choose according to: https://modal.com/pricing
-NUM_CPUS = 8 # for training want more than 1 (4 is good)
-MEM = 32768 # for training you need more (16384 is a good default)ccording to: https://modal.com/pricing
+GPU_TYPE = 'A10'  # choose according to: https://modal.com/pricing
+NUM_CPUS = 8      # for training want more than 1 (4 is good)
+MEM = 32768       # for training you need more (16384 is a good default) -- see: https://modal.com/pricing
+
+# How long to wait for Jupyter to become reachable after the sandbox is created.
+# Cold starts (first run, image not cached) can take 3–5 min; warm starts are ~30s.
+STARTUP_TIMEOUT = 600  # seconds
 ###########################
 
 
 import json
 import secrets
+import ssl
+import sys
 import time
+import urllib.error
 import urllib.request
 
 import modal
+
+# Modal tunnel certificates may not be in Python's local CA bundle.
+# This context is used only for the /api/status health-check poll — we're
+# not sending any credentials over it, so skipping verification is safe here.
+_SSL_CTX = ssl.create_default_context()
+_SSL_CTX.check_hostname = False
+_SSL_CTX.verify_mode = ssl.CERT_NONE
 
 STORAGE_VOLUME_NAME = "jupyter_kernel"
 
@@ -44,15 +58,15 @@ image = (
         "wget", "git", "pkg-config", "curl", "aria2",
         "libsndfile1", "libsndfile1-dev", "libflac-dev", "libvorbis-dev",
         "libopus-dev", "libmp3lame-dev", "libfdk-aac-dev", "libspeex-dev",
-        
+
         # FFmpeg with all codecs - ensure latest version
         "ffmpeg", "libavcodec-dev", "libavformat-dev", "libavutil-dev",
         "libswresample-dev", "libavfilter-dev", "libavdevice-dev",
-        
+
         # Audio processing tools
         "libsamplerate0-dev", "libsox-dev", "sox", "rubberband-cli",
         "pulseaudio", "alsa-utils",
-        
+
         # Additional packages for better audio support
         "libportaudio2", "libportaudiocpp0", "portaudio19-dev",
     )
@@ -75,7 +89,7 @@ image = (
         "datasets[audio]==2.16.1",  # Pin to stable version
         "audioread",
         "itables",
-        "huggingface_hub[hf_transfer]==0.26.2",        
+        "huggingface_hub[hf_transfer]==0.26.2",
         "torch",
         "torchaudio",  # Add torchaudio explicitly
         "sounddevice",
@@ -86,7 +100,7 @@ image = (
         "transformers",
         "transformers[torch]",  # Ensure torch dependencies
         "tensorboardX",
-        #plotting
+        # Plotting
         "matplotlib",
         # Audio processing alternatives
         "librosa>=0.10.0",
@@ -95,7 +109,7 @@ image = (
         "av>=10.0.0",  # PyAV as alternative to torchcodec
         # Evaluation metrics
         "evaluate>=0.4.0",
-        "jiwer",  # WER calculation backend
+        "jiwer",    # WER calculation backend
         "sacrebleu",
     )
 )
@@ -105,10 +119,7 @@ token = secrets.token_urlsafe(13)
 token_secret = modal.Secret.from_dict({"JUPYTER_TOKEN": token})
 
 
-
-
-
-print("🏖️  Creating sandbox")
+print("🏖️  Creating sandbox...")
 
 with modal.enable_output():
     sandbox = modal.Sandbox.create(
@@ -128,34 +139,80 @@ with modal.enable_output():
         gpu=GPU_TYPE,
         cpu=NUM_CPUS,
         memory=MEM,
-        volumes={f"/{STORAGE_VOLUME_NAME}": volume} 
+        volumes={f"/{STORAGE_VOLUME_NAME}": volume},
     )
 
 print(f"🏖️  Sandbox ID: {sandbox.object_id}")
 
 tunnel = sandbox.tunnels()[JUPYTER_PORT]
-url = f"{tunnel.url}/?token={token}"
-print(f"🏖️  Jupyter notebook is running at: {url}")
+jupyter_url = f"{tunnel.url}/?token={token}"
+status_url = f"{tunnel.url}/api/status?token={token}"
+
+print(f"🏖️  Tunnel established. Waiting for Jupyter to start (timeout: {STARTUP_TIMEOUT}s)...")
+print(f"    Cold starts (uncached image) typically take 3–5 min.")
+print(f"    Warm starts typically take ~30s.")
 
 
-def is_jupyter_up():
+def is_jupyter_up(verbose=False):
+    """
+    Poll the Jupyter /api/status endpoint.
+    Returns True when Jupyter reports it has started.
+    Prints the specific failure reason when verbose=True, so you can
+    distinguish 'still booting' from 'something is actually wrong'.
+    """
     try:
-        response = urllib.request.urlopen(f"{tunnel.url}/api/status?token={token}")
+        response = urllib.request.urlopen(status_url, timeout=5, context=_SSL_CTX)
         if response.getcode() == 200:
             data = json.loads(response.read().decode())
             return data.get("started", False)
-    except Exception:
-        return False
+        if verbose:
+            print(f"    [poll] Unexpected HTTP status: {response.getcode()}")
+    except urllib.error.HTTPError as e:
+        if verbose:
+            print(f"    [poll] HTTP error: {e.code} {e.reason}")
+    except urllib.error.URLError as e:
+        # This is normal while the server is still booting — suppress unless verbose
+        if verbose:
+            print(f"    [poll] URL error (server not yet reachable): {e.reason}")
+    except Exception as e:
+        if verbose:
+            print(f"    [poll] Unexpected error: {e}")
     return False
 
 
-# timeout for startup
-startup_timeout = 60  # seconds
+# Poll with a short initial delay, then slow down slightly to reduce noise.
+# Print a progress dot every 10 seconds so you know it's still working.
+POLL_INTERVAL = 3      # seconds between each check
+VERBOSE_AFTER = 120    # start printing poll errors after this many seconds (helps debug stalls)
+
 start_time = time.time()
-while time.time() - start_time < startup_timeout:
-    if is_jupyter_up():
-        print("🏖️  Jupyter is up and running!")
+last_dot_time = start_time
+dot_interval = 10  # print a dot every N seconds
+
+print("    ", end="", flush=True)
+
+while True:
+    elapsed = time.time() - start_time
+
+    if elapsed >= STARTUP_TIMEOUT:
+        print()  # newline after dots
+        print(f"🏖️  Timed out after {STARTUP_TIMEOUT}s waiting for Jupyter to start.")
+        print(f"    Sandbox ID: {sandbox.object_id}")
+        print(f"    Check the sandbox logs at: https://modal.com/sandboxes/")
+        print(f"    You can also try connecting manually once it's up: {jupyter_url}")
+        sys.exit(1)
+
+    verbose = elapsed > VERBOSE_AFTER
+    if is_jupyter_up(verbose=verbose):
+        print()  # newline after dots
+        print(f"🏖️  Jupyter is up and running! ({elapsed:.0f}s)")
+        print(f"🏖️  Open your notebook: {jupyter_url}")
         break
-    time.sleep(1)
-else:
-    print("🏖️  Timed out waiting for Jupyter to start.")    
+
+    # Progress indicator
+    now = time.time()
+    if now - last_dot_time >= dot_interval:
+        print(f".", end="", flush=True)
+        last_dot_time = now
+
+    time.sleep(POLL_INTERVAL)
