@@ -33,10 +33,10 @@ JUPYTER_PORT = 8888
 # TIMEOUT = 3600 # seconds
 TIMEOUT = 86400   # 24 hours maximum for Modal sandbox
                   # -> don't forget to stop the sandbox when done!
-GPU_TYPE = 'L4'   # choose according to: https://modal.com/pricing
-NUM_CPUS = 4      # for training want more than 1 (4 is good)
-MEM = 32768       # for training you need more (16384 is a good default)
-                  # see: https://modal.com/pricing
+GPU_TYPE = 'a100-40gb'  # choose according to: https://modal.com/pricing
+NUM_CPUS = 4            # for training want more than 1 (4 is good)
+MEM = 32768             # for training you need more (16384 is a good default)
+                        # see: https://modal.com/pricing
 
 # How long to wait for Jupyter to become reachable after the sandbox is created.
 # Cold starts (first run, image not cached) can take 3–5 min; warm starts are ~30s.
@@ -149,6 +149,14 @@ image = (
         "librosa>=0.10.0",
         "soundfile>=0.12.0",
         "av>=10.0.0",           # PyAV — stable alternative to torchcodec
+
+        # ── Fine-tuning essentials ────────────────────────────────────────────
+        # Required by HuggingFace Trainer for mixed-precision / distributed training
+        "accelerate",
+        # LoRA / QLoRA adapter training — cuts GPU VRAM ~3-4x vs full fine-tune
+        "peft",
+        # 8-bit / 4-bit quantized optimizers (AdamW8bit etc.) — optional but useful
+        "bitsandbytes",
 
         # Training utilities
         "tensorboardX",
