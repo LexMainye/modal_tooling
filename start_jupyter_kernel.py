@@ -33,7 +33,7 @@ JUPYTER_PORT = 8888
 # TIMEOUT = 3600 # seconds
 TIMEOUT = 86400   # 24 hours maximum for Modal sandbox
                   # -> don't forget to stop the sandbox when done!
-GPU_TYPE = 'a100-40gb'  # choose according to: https://modal.com/pricing
+GPU_TYPE = 'a100-80gb'  # choose according to: https://modal.com/pricing
 NUM_CPUS = 4            # for training want more than 1 (4 is good)
 MEM = 32768             # for training you need more (16384 is a good default)
                         # see: https://modal.com/pricing
@@ -119,9 +119,21 @@ _with_torch = (
         "torchaudio",
 
         # HuggingFace core
-        "transformers[torch]==4.47.0",   # pin for reproducibility
+        # 4.57.6 is the last transformers release before the v5.0 major bump.
+        # Pinned here (not 4.47.0) because it's the last 4.x release, and
+        # includes GraniteSpeechProcessor (added in 4.52.0) plus every
+        # subsequent 4.x bugfix, WITHOUT crossing into v5's breaking changes.
+        # This means notebooks needing Granite 4.0 Speech no longer have to
+        # pip-upgrade transformers live inside a running kernel at all.
+        "transformers[torch]==4.57.6",   # pin for reproducibility
         "datasets[audio]==2.16.1",
-        "huggingface_hub[hf_transfer]==0.26.2",
+        # v5 transformers hard-requires huggingface_hub>=1.0.0 (a breaking
+        # major bump of its own — new HTTP backend, dropped hf_transfer).
+        # transformers 4.57.6 itself enforces huggingface_hub>=0.34.0,<1.0
+        # at import time (see huggingface/transformers#41970) — 0.26.2 is
+        # BELOW that floor and will fail the check. 0.36.2 is the latest
+        # release on the last pre-1.0 line, so it satisfies both bounds.
+        "huggingface_hub[hf_transfer]==0.36.2",
 
         # Whisper inference
         "ctranslate2",
